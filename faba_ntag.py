@@ -63,15 +63,6 @@ class NTAGData:
     def add_page(self, page, data):
         self.pages[page] = data
 
-    #def print_pages(self):
-    #    print(f"")
-    #    print(f"Page ##:  HEX          |  ASCII")
-    #    print(f"--------  -----------     -----")
-    #    for page, data in sorted(self.pages.items()):
-    #        hex_part = ' '.join(f'{byte:02X}' for byte in data)
-    #        ascii_part = ''.join(chr(byte) if chr(byte) in string.printable and byte >= 0x20 else '.' for byte in data)
-    #        print(f"Page {page:02X}:  {hex_part:<12} |  {ascii_part}")
-
     def read_page(self, page_number):
         if page_number in self.pages:
             page_data = self.pages[page_number]
@@ -121,7 +112,7 @@ def detect_card(pn532, ntag):
             break
         ntag.add_page(page, data)
         page = page + 1
-    
+    #print(ntag)
     cc_byte = ntag.read_page(3)[2]
     #logging.debug(f"  Capability Container (CC) byte: 0x{cc_byte:02X}")
     
@@ -225,6 +216,10 @@ def parse_text(ntag):
         extracted_id = text_content[8:12]  # Extract next 4 digits
         ntag.code = extracted_id
         logging.info(f"  FabaID: {ntag.code}")
+    elif text_content.startswith("abcde02190530") and len(text_content) >= 17:
+        extracted_id = text_content[13:17]  # Extract next 4 digits
+        ntag.code = extracted_id
+        logging.info(f"  FabaID: {ntag.code}")
     else:
         logging.info("No valid Faba folder ID found")
 
@@ -238,12 +233,20 @@ def create_byte_array(input_str, ntag):
         231: 0xFA   # NTAG216
     }
 
+
+    # Compute dynamic lengths based on the actual text we will write.
+    # input_str is the 'text' that starts with 'en...' (e.g., "en02190530....")
+    # NDEF Text payload length = 1 (status) + len(input_str)
+    payload_len = 1 + (len(input_str) if input_str else 0)        # e.g., 17 or 22
+    ndef_len    = 4 + payload_len                                 # D1 01 <len> 54 + payload
+
     # Get MLen based on size, default to 0xA0 (NTAG213)
     mlen = size_to_mlen.get(ntag.size, 0xA0)
 
     page04 = [0x01, 0x03, mlen, 0x0C]
-    page05 = [0x34, 0x03, 0x15, 0xD1]
-    page06 = [0x01, 0x11, 0x54, 0x02]  # Fixed for FabaID
+    page05 = [0x34, 0x03, ndef_len & 0xFF, 0xD1]                  # 0x03 TLV, length, then NDEF header 0xD1
+    page06 = [0x01, payload_len & 0xFF, 0x54, 0x02]               # SR, TNF=well-known, type='T', lang len=2
+
     page11 = [0xFE, 0x00, 0x00, 0x00]
     
     # Pages 00-03
@@ -294,27 +297,47 @@ def print_byte_array(byte_array):
         logging.debug(f"Page {i//4:03d}:  {hex_part:<12} |  {ascii_part}")
 
 
-def encode_faba_id(id):
-    text = "en02190530" + id + "00"
+#def encode_faba_id(id):
+#    text = "en02190530" + id + "00"
+#    return text
+
+
+def encode_faba_id(id, ntag=None, use_prefix=False):
+    """
+    Encode the Faba text payload.
+    If use_prefix is True and the tag is NTAG215, prepend the fixed 5-char buffer.
+    """
+    fixed_prefix = "abcde"  # 5-char buffer, not user-specified
+    if ntag and ntag.type in ("NTAG215", "NTAG216") and use_prefix:
+        text = fixed_prefix + "en02190530" + id + "00"
+    else:
+        text = "en02190530" + id + "00"
     return text
+
 
 
 def read_ntag(ntag):
     parse_text(ntag)
 
 
-def write_ntag(pn532, id, ntag):
+
+def write_ntag(pn532, id, ntag, use_prefix=False):
     logging.info(f"Writing tag with UID: {' '.join([f'{byte:02X}' for byte in ntag.uid])}")
     logging.info(f"FabaID: {id}")
-    text = encode_faba_id(id)
+
+    text = encode_faba_id(id, ntag, use_prefix)
     logging.debug(f" Encoded FabaID: {text}")
+
     byte_array = create_byte_array(text, ntag)
     print_byte_array(byte_array)
-    if write_blocks(pn532, byte_array, 4, 11, ntag):
-        if verify_blocks(pn532, byte_array, 4, 11):
+
+    #if write_blocks(pn532, byte_array, 4, 11, ntag):
+    if write_blocks(pn532, byte_array, 4, 13, ntag):
+        #if verify_blocks(pn532, byte_array, 4, 11):
+        if verify_blocks(pn532, byte_array, 4, 13):
             logging.info("NTAG successfully written")
-            # Dump content
             dump_ntag(byte_array, ntag)
+
 
 
 def write_blocks(pn532, byte_array, start, end, ntag):
@@ -426,10 +449,11 @@ def dump_ntag(byte_array, ntag):
         save_flipper(byte_array, ntag, filename)
 
 
-def crete_ntag(uid, type, id):
-    logging.info(f"  UID:    {' '.join([f'{byte:02X}' for byte in uid])}")
-    logging.info(f"  Type:   {type}")
-    logging.info(f"  FabaID: {id}")
+
+def crete_ntag(uid, type, id, use_prefix=False):
+    logging.info(f" UID: {' '.join([f'{byte:02X}' for byte in uid])}")
+    logging.info(f" Type: {type}")
+    logging.info(f" FabaID: {id}")
 
     if len(uid) != 7:
         raise ValueError("UID must be exactly 7 bytes")
@@ -458,6 +482,7 @@ def crete_ntag(uid, type, id):
     page04 = [0x01, 0x03, spec["mlen"], 0x0C]
     
     # Create NTAGData instance and assign properties
+    
     ntag = NTAGData()
     ntag.uid = uid
     ntag.type = type
@@ -468,7 +493,7 @@ def crete_ntag(uid, type, id):
     ntag.add_page(3, page03)
     ntag.add_page(4, page04)
 
-    text = encode_faba_id(id)
+    text = encode_faba_id(id, ntag, use_prefix)  # <-- pass the toggle here
     logging.debug(f" Encoded FabaID: {text}")
     byte_array = create_byte_array(text, ntag)
     print_byte_array(byte_array)
@@ -592,7 +617,7 @@ def main():
 
         # Create option outside the group so we can enforce exclusivity manually
         parser.add_argument("-c", "--create", nargs=3, metavar=("UID", "TYPE", "ID"), help="Create manually Flipper Zero (.nfc) file. Requires UID (7-byte hex), TYPE (NTAG203/213/215/216), ID (4-digit)")
-
+        parser.add_argument("-u", "--use-prefix", action="store_true", help="When writing, use the 5-char prefix in NTAG215 or NTAG216(default: False)")
         parser.add_argument("-p", "--port", metavar="PORT", type=str, help="NFC reader serial port (e.g. COM1 or /dev/ttyUSB0)")
         parser.add_argument("-v", action="store_true", help="Enable debug logging")
 
@@ -628,8 +653,8 @@ def main():
                 logging.error("ID must be a 4-digit number")
                 return False
             
-            crete_ntag(uid, tag_type, tag_id)
-
+            #crete_ntag(uid, tag_type, tag_id)
+            crete_ntag(uid, tag_type, tag_id, use_prefix=args.use_prefix)
             return True
 
 
@@ -665,7 +690,7 @@ def main():
         # Write NTAG
         elif args.write:
             if re.fullmatch(r"\d{4}", args.write):
-                write_ntag(pn532, args.write, ntag)
+                write_ntag(pn532, args.write, ntag, use_prefix=args.use_prefix)
             else:
                 logging.error("Invalid ID format. Must be a 4-digit number (e.g., '1234').")
                 return False
@@ -692,5 +717,18 @@ def main():
         return False
 
 
+#if __name__ == "__main__":
+#    main()
+
 if __name__ == "__main__":
-    main()
+    import time, logging
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            logging.warning('Interrupted by user. Exiting.')
+            break
+        except Exception as e:
+            logging.exception(f'Fatal error: {e}')
+        logging.info('Restarting in 2 seconds… Press Ctrl-C to exit.')
+        time.sleep(2)
