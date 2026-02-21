@@ -108,7 +108,7 @@ def detect_card(pn532, ntag):
 
     page = 0
     while True:
-        data = read_page_retry(pn532, page, tries=5, delay=0.05)
+        data = read_page_retry(pn532, page, tries=8, delay=0.1)
         if not data:
             break
         ntag.add_page(page, data)
@@ -117,7 +117,7 @@ def detect_card(pn532, ntag):
     #make sure page 3 (CC) is available, try again if missing
     cc_page = ntag.read_page(3)
     if cc_page is None:
-        cc_page = read_page_retry(pn532, 3, tries=8, delay=0.06)
+        cc_page = read_page_retry(pn532, 3, tries=8, delay=0.1)
         if cc_page is None:
             logging.error("Failed to read Capability Container (Page 3). Keep the tag steady and try again.")
             return False
@@ -166,7 +166,7 @@ def read_page(pn532, page):
         logging.warning(f"Error reading page {page}: {e}")
         return None
 
-def read_page_retry(pn532, page, tries=5, delay=0.08):
+def read_page_retry(pn532, page, tries=8, delay=0.1):
     """
     Read a page with small retries to handle transient read errors.
     Returns the 4-byte page or None.
